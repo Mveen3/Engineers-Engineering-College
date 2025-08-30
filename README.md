@@ -10,7 +10,6 @@ A responsive and visually engaging static website showcasing the offerings of an
 - `css/` — Stylesheet directory containing all custom CSS for layout and design.
 - `image/` — Collection of image assets used across the site (e.g., photos of campus, facilities).
 - `pdf/` — PDF documents (such as brochures, course catalogs, or prospectuses) for user download.
-- *(Add any additional folders or files here if present)*
 
 ---
 
