@@ -1,0 +1,283 @@
+From ff0f66d10bbe2b20d23d226eac66f8676abb372d Mon Sep 17 00:00:00 2001
+From: Nishanth-nishu <nishanth0962333@gmail.com>
+Date: Tue, 29 Sep 2026 12:47:28 +0000
+Subject: [PATCH] Food ordering: add RCE demo logs (job 100177, 3 nodes) and
+ 20/20 cluster test results
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012h716Kap1LsxB9yFkHUCLd
+---
+ section3_q2_food_ordering/README.md           | 61 ++++++++++++++++++-
+ .../demo/sample_logs_rce/customer_alice.log   | 43 +++++++++++++
+ .../demo/sample_logs_rce/customer_bob.log     | 29 +++++++++
+ .../sample_logs_rce/restaurant_burger.log     | 14 +++++
+ .../demo/sample_logs_rce/restaurant_pizza.log | 28 +++++++++
+ .../demo/sample_logs_rce/server.log           | 12 ++++
+ .../demo/sample_logs_rce/tests.log            | 22 +++++++
+ 7 files changed, 208 insertions(+), 1 deletion(-)
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/server.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+
+diff --git a/section3_q2_food_ordering/README.md b/section3_q2_food_ordering/README.md
+index 2dec7e8..7592a47 100644
+--- a/section3_q2_food_ordering/README.md
++++ b/section3_q2_food_ordering/README.md
+@@ -243,7 +243,66 @@ Four clients run concurrently against one server (Pizza House, Burger Point, ali
+ [Client] Order O102 : CANCELLED
+ ```
+ 
+-## Correctness verification (`test_food_ordering.py`, 20/20 pass)
++## RCE cluster run (job 100177, 3 nodes – `demo/sample_logs_rce/`)
++
++`sbatch run_demo.sbatch` on the `debug` partition. **Server on node01**, customers alice + bob
++on **node02**, restaurants Pizza House + Burger Point on **node03**. All clients reach the
++server over the cluster network at `node01:33015` (a port assigned by the OS; see
++*Ports on shared nodes* above).
++
++**Server log.** Two customers and two restaurants on different nodes, all served
++concurrently:
++```
++[Server] Food Ordering Server listening on 0.0.0.0:33015 (thread pool = 64)
++[Server] Order O101 PLACED at Pizza House by alice (total 550)
++[Server] Subscriber attached to O101
++[Server] Order O102 PLACED at Burger Point by bob (total 460)
++[Server] Order O101: PLACED -> ACCEPTED (Pizza House)
++[Server] Order O102: PLACED -> CANCELLED (customer)
++[Server] Order O101: ACCEPTED -> PREPARING (Pizza House)
++[Server] Order O101: PREPARING -> READY (Pizza House)
++[Server] Subscriber detached from O101
++```
++**Real-time tracking across nodes.** alice (node02) receives every state change pushed by
++Pizza House (node03):
++```
++> track O101
++[Client] Tracking order O101...
++[Update] Order O101 : PLACED
++[Update] Order O101 : ACCEPTED
++[Update] Order O101 : PREPARING
++[Update] Order O101 : READY
++[Client] Order O101 finished; tracking stopped.
++> cancel O101
++[Error] Order O101 cannot be cancelled: it is already READY. (gRPC status: FAILED_PRECONDITION)
++```
++**New-order push to the restaurant, and ownership checks** (Pizza House / Burger Point, node03):
++```
++[New Order] O101 from alice: Margherita Pizza x1, Garlic Bread x2 (total 550)
++> prepare O101
++[Error] Invalid order state transition: READY -> PREPARING. (gRPC status: FAILED_PRECONDITION)
++> accept O102
++[Error] Order O102 belongs to Burger Point, not 'Pizza House'. (gRPC status: PERMISSION_DENIED)
++```
++**Error handling** (bob, node02):
++```
++> order Taco Town "Tacos" 1
++[Error] Restaurant 'Taco Town' does not exist. (gRPC status: NOT_FOUND)
++> order Pizza House "Sushi" 1
++[Error] Item 'Sushi' is not available at Pizza House. (gRPC status: NOT_FOUND)
++> status O999
++[Error] Order O999 does not exist. (gRPC status: NOT_FOUND)
++> cancel O102
++[Client] Order O102 : CANCELLED
++```
++**Automated tests on the cluster.** `test_food_ordering.py` ran on node02 against a fresh
++server on node01 (`node01:41159`): **passed=20 failed=0**. This includes the concurrency
++tests over the real network: 200 concurrent `PlaceOrder` calls got unique IDs, and of 20
++racing `ACCEPT` calls exactly 1 won and 19 got `FAILED_PRECONDITION`. The accept-vs-cancel
++race stayed consistent in 20/20 trials, and 5 concurrent subscribers each received all 4
++states. Full output: `demo/sample_logs_rce/tests.log`.
++
++## Correctness verification (`test_food_ordering.py`, 20/20 pass locally and on RCE)
+ 
+ Listing; order id/total/status; full lifecycle over a stream (stream closes after
+ `READY`); all exception cases with the expected status codes; **200 concurrent
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log b/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+new file mode 100644
+index 0000000..428d143
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+@@ -0,0 +1,43 @@
++[Client] Connected as customer 'alice'.
++Options:
++  1. List Restaurants   -> restaurants
++  2. Place Order        -> order <Restaurant> "<Item>" <qty> ["<Item>" <qty> ...]
++  3. Check Order Status -> status <order_id>
++  4. Track Order        -> track <order_id>
++  5. Cancel Order       -> cancel <order_id>
++  6. Exit               -> exit
++> restaurants
++[Server]
++1. Pizza House
++   - Margherita Pizza : 250
++   - Farmhouse Pizza  : 350
++   - Garlic Bread     : 150
++2. Burger Point
++   - Veg Burger    : 180
++   - Cheese Burger : 220
++   - French Fries  : 120
++3. Dosa Corner
++   - Masala Dosa   : 90
++   - Idli Vada     : 70
++   - Filter Coffee : 40
++> order Pizza House "Margherita Pizza" 1 "Garlic Bread" 2
++[Client] Order placed successfully.
++[Client] Order ID: O101
++[Client] Items: Margherita Pizza x1, Garlic Bread x2
++[Client] Total: 550
++[Client] Status: PLACED
++> track O101
++[Client] Tracking order O101...
++> sleep 5
++[Update] Order O101 : PLACED
++[Update] Order O101 : ACCEPTED
++[Update] Order O101 : PREPARING
++[Update] Order O101 : READY
++[Client] Order O101 finished; tracking stopped.
++> cancel O101
++[Error] Order O101 cannot be cancelled: it is already READY. (gRPC status: FAILED_PRECONDITION)
++> status O101
++[Client] Order O101 (Pizza House: Margherita Pizza x1, Garlic Bread x2) : READY
++> sleep 3
++> exit
++[Client] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log b/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+new file mode 100644
+index 0000000..e0c1255
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+@@ -0,0 +1,29 @@
++[Client] Connected as customer 'bob'.
++Options:
++  1. List Restaurants   -> restaurants
++  2. Place Order        -> order <Restaurant> "<Item>" <qty> ["<Item>" <qty> ...]
++  3. Check Order Status -> status <order_id>
++  4. Track Order        -> track <order_id>
++  5. Cancel Order       -> cancel <order_id>
++  6. Exit               -> exit
++> sleep 1
++> order Taco Town "Tacos" 1
++[Error] Restaurant 'Taco Town' does not exist. (gRPC status: NOT_FOUND)
++> order Pizza House "Sushi" 1
++[Error] Item 'Sushi' is not available at Pizza House. (gRPC status: NOT_FOUND)
++> status O999
++[Error] Order O999 does not exist. (gRPC status: NOT_FOUND)
++> order Burger Point "Cheese Burger" 1 "French Fries" 2
++[Client] Order placed successfully.
++[Client] Order ID: O102
++[Client] Items: Cheese Burger x1, French Fries x2
++[Client] Total: 460
++[Client] Status: PLACED
++> sleep 1
++> cancel O102
++[Client] Order O102 : CANCELLED
++> status O102
++[Client] Order O102 (Burger Point: Cheese Burger x1, French Fries x2) : CANCELLED
++> sleep 6
++> exit
++[Client] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+new file mode 100644
+index 0000000..c8fdaf4
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+@@ -0,0 +1,14 @@
++[Restaurant] Logged in as 'Burger Point'.
++Options:
++  1. View Pending Orders -> pending
++  2. Accept Order        -> accept <order_id>
++  3. Start Preparing     -> prepare <order_id>
++  4. Mark Ready          -> ready <order_id>
++  5. Exit                -> exit
++> sleep 1.5
++> accept O101
++[Error] Order O101 belongs to Pizza House, not 'Burger Point'. (gRPC status: PERMISSION_DENIED)
++> sleep 8
++[New Order] O102 from bob: Cheese Burger x1, French Fries x2 (total 460)
++> exit
++[Restaurant] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+new file mode 100644
+index 0000000..5f76ffe
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+@@ -0,0 +1,28 @@
++[Restaurant] Logged in as 'Pizza House'.
++Options:
++  1. View Pending Orders -> pending
++  2. Accept Order        -> accept <order_id>
++  3. Start Preparing     -> prepare <order_id>
++  4. Mark Ready          -> ready <order_id>
++  5. Exit                -> exit
++> sleep 2
++[New Order] O101 from alice: Margherita Pizza x1, Garlic Bread x2 (total 550)
++> pending
++[Restaurant] Order O101 : PLACED   (Margherita Pizza x1, Garlic Bread x2; total 550)
++> accept O101
++[Restaurant] Order O101 : ACCEPTED
++> sleep 1
++> prepare O101
++[Restaurant] Order O101 : PREPARING
++> sleep 1
++> ready O101
++[Restaurant] Order O101 : READY
++> prepare O101
++[Error] Invalid order state transition: READY -> PREPARING. (gRPC status: FAILED_PRECONDITION)
++> accept O102
++[Error] Order O102 belongs to Burger Point, not 'Pizza House'. (gRPC status: PERMISSION_DENIED)
++> pending
++[Restaurant] No pending orders.
++> sleep 3
++> exit
++[Restaurant] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/server.log b/section3_q2_food_ordering/demo/sample_logs_rce/server.log
+new file mode 100644
+index 0000000..c3b71fc
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/server.log
+@@ -0,0 +1,12 @@
++[Server] Food Ordering Server listening on 0.0.0.0:33015 (thread pool = 64)
++[Server]   Pizza House: Margherita Pizza (250), Farmhouse Pizza (350), Garlic Bread (150)
++[Server]   Burger Point: Veg Burger (180), Cheese Burger (220), French Fries (120)
++[Server]   Dosa Corner: Masala Dosa (90), Idli Vada (70), Filter Coffee (40)
++[Server] Order O101 PLACED at Pizza House by alice (total 550)
++[Server] Subscriber attached to O101
++[Server] Order O102 PLACED at Burger Point by bob (total 460)
++[Server] Order O101: PLACED -> ACCEPTED (Pizza House)
++[Server] Order O102: PLACED -> CANCELLED (customer)
++[Server] Order O101: ACCEPTED -> PREPARING (Pizza House)
++[Server] Order O101: PREPARING -> READY (Pizza House)
++[Server] Subscriber detached from O101
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/tests.log b/section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+new file mode 100644
+index 0000000..10494f8
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+@@ -0,0 +1,22 @@
++PASS  ListRestaurants returns predefined restaurants  [Pizza House, Burger Point, Dosa Corner]
++PASS  PlaceOrder assigns id, total, PLACED  [O101 total=550]
++PASS  GetOrderStatus
++PASS  Subscriber receives PLACED->ACCEPTED->PREPARING->READY and stream closes  [PLACED -> ACCEPTED -> PREPARING -> READY]
++PASS  Order from non-existent restaurant -> NOT_FOUND  [NOT_FOUND: Restaurant 'Taco Town' does not exist.]
++PASS  Order unavailable food item -> NOT_FOUND  [NOT_FOUND: Item 'Sushi' is not available at Pizza House.]
++PASS  Zero quantity -> INVALID_ARGUMENT  [INVALID_ARGUMENT: Quantity for 'Garlic Bread' must be positive.]
++PASS  Access non-existent order -> NOT_FOUND  [NOT_FOUND: Order O99999 does not exist.]
++PASS  Cancel an already ACCEPTED order -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Order O102 cannot be cancelled: it is already ACCEPTED.]
++PASS  Restaurant updates another restaurant's order -> PERMISSION_DENIED  [PERMISSION_DENIED: Order O102 belongs to Pizza House, not 'Burger Point'.]
++PASS  Invalid transition ACCEPTED->READY -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Invalid order state transition: ACCEPTED -> READY.]
++PASS  Invalid transition READY->PREPARING -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Invalid order state transition: READY -> PREPARING.]
++PASS  Cancel someone else's order -> PERMISSION_DENIED  [PERMISSION_DENIED: Order O103 was not placed by 'mallory'.]
++PASS  Customer cancels PLACED order
++PASS  200 concurrent PlaceOrder calls get unique order IDs
++PASS  20 racing ACCEPT calls on one order: exactly 1 wins  [wins=1 failed_precondition=19]
++PASS  Cancel-vs-accept race (20 trials): exactly one wins, state consistent  [20/20]
++PASS  5 concurrent subscribers each receive all 4 states
++PASS  Restaurant is pushed new orders (SubscribeToNewOrders)
++PASS  ListRestaurantOrders shows only this restaurant's active orders
++----
++passed=20 failed=0
+-- 
+2.43.0
+
