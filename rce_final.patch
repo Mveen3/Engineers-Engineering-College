@@ -1,0 +1,1191 @@
+From ff0f66d10bbe2b20d23d226eac66f8676abb372d Mon Sep 17 00:00:00 2001
+From: Nishanth-nishu <nishanth0962333@gmail.com>
+Date: Tue, 29 Sep 2026 12:47:28 +0000
+Subject: [PATCH 1/2] Food ordering: add RCE demo logs (job 100177, 3 nodes)
+ and 20/20 cluster test results
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012h716Kap1LsxB9yFkHUCLd
+---
+ section3_q2_food_ordering/README.md           | 61 ++++++++++++++++++-
+ .../demo/sample_logs_rce/customer_alice.log   | 43 +++++++++++++
+ .../demo/sample_logs_rce/customer_bob.log     | 29 +++++++++
+ .../sample_logs_rce/restaurant_burger.log     | 14 +++++
+ .../demo/sample_logs_rce/restaurant_pizza.log | 28 +++++++++
+ .../demo/sample_logs_rce/server.log           | 12 ++++
+ .../demo/sample_logs_rce/tests.log            | 22 +++++++
+ 7 files changed, 208 insertions(+), 1 deletion(-)
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/server.log
+ create mode 100644 section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+
+diff --git a/section3_q2_food_ordering/README.md b/section3_q2_food_ordering/README.md
+index 2dec7e8..7592a47 100644
+--- a/section3_q2_food_ordering/README.md
++++ b/section3_q2_food_ordering/README.md
+@@ -243,7 +243,66 @@ Four clients run concurrently against one server (Pizza House, Burger Point, ali
+ [Client] Order O102 : CANCELLED
+ ```
+ 
+-## Correctness verification (`test_food_ordering.py`, 20/20 pass)
++## RCE cluster run (job 100177, 3 nodes – `demo/sample_logs_rce/`)
++
++`sbatch run_demo.sbatch` on the `debug` partition. **Server on node01**, customers alice + bob
++on **node02**, restaurants Pizza House + Burger Point on **node03**. All clients reach the
++server over the cluster network at `node01:33015` (a port assigned by the OS; see
++*Ports on shared nodes* above).
++
++**Server log.** Two customers and two restaurants on different nodes, all served
++concurrently:
++```
++[Server] Food Ordering Server listening on 0.0.0.0:33015 (thread pool = 64)
++[Server] Order O101 PLACED at Pizza House by alice (total 550)
++[Server] Subscriber attached to O101
++[Server] Order O102 PLACED at Burger Point by bob (total 460)
++[Server] Order O101: PLACED -> ACCEPTED (Pizza House)
++[Server] Order O102: PLACED -> CANCELLED (customer)
++[Server] Order O101: ACCEPTED -> PREPARING (Pizza House)
++[Server] Order O101: PREPARING -> READY (Pizza House)
++[Server] Subscriber detached from O101
++```
++**Real-time tracking across nodes.** alice (node02) receives every state change pushed by
++Pizza House (node03):
++```
++> track O101
++[Client] Tracking order O101...
++[Update] Order O101 : PLACED
++[Update] Order O101 : ACCEPTED
++[Update] Order O101 : PREPARING
++[Update] Order O101 : READY
++[Client] Order O101 finished; tracking stopped.
++> cancel O101
++[Error] Order O101 cannot be cancelled: it is already READY. (gRPC status: FAILED_PRECONDITION)
++```
++**New-order push to the restaurant, and ownership checks** (Pizza House / Burger Point, node03):
++```
++[New Order] O101 from alice: Margherita Pizza x1, Garlic Bread x2 (total 550)
++> prepare O101
++[Error] Invalid order state transition: READY -> PREPARING. (gRPC status: FAILED_PRECONDITION)
++> accept O102
++[Error] Order O102 belongs to Burger Point, not 'Pizza House'. (gRPC status: PERMISSION_DENIED)
++```
++**Error handling** (bob, node02):
++```
++> order Taco Town "Tacos" 1
++[Error] Restaurant 'Taco Town' does not exist. (gRPC status: NOT_FOUND)
++> order Pizza House "Sushi" 1
++[Error] Item 'Sushi' is not available at Pizza House. (gRPC status: NOT_FOUND)
++> status O999
++[Error] Order O999 does not exist. (gRPC status: NOT_FOUND)
++> cancel O102
++[Client] Order O102 : CANCELLED
++```
++**Automated tests on the cluster.** `test_food_ordering.py` ran on node02 against a fresh
++server on node01 (`node01:41159`): **passed=20 failed=0**. This includes the concurrency
++tests over the real network: 200 concurrent `PlaceOrder` calls got unique IDs, and of 20
++racing `ACCEPT` calls exactly 1 won and 19 got `FAILED_PRECONDITION`. The accept-vs-cancel
++race stayed consistent in 20/20 trials, and 5 concurrent subscribers each received all 4
++states. Full output: `demo/sample_logs_rce/tests.log`.
++
++## Correctness verification (`test_food_ordering.py`, 20/20 pass locally and on RCE)
+ 
+ Listing; order id/total/status; full lifecycle over a stream (stream closes after
+ `READY`); all exception cases with the expected status codes; **200 concurrent
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log b/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+new file mode 100644
+index 0000000..428d143
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/customer_alice.log
+@@ -0,0 +1,43 @@
++[Client] Connected as customer 'alice'.
++Options:
++  1. List Restaurants   -> restaurants
++  2. Place Order        -> order <Restaurant> "<Item>" <qty> ["<Item>" <qty> ...]
++  3. Check Order Status -> status <order_id>
++  4. Track Order        -> track <order_id>
++  5. Cancel Order       -> cancel <order_id>
++  6. Exit               -> exit
++> restaurants
++[Server]
++1. Pizza House
++   - Margherita Pizza : 250
++   - Farmhouse Pizza  : 350
++   - Garlic Bread     : 150
++2. Burger Point
++   - Veg Burger    : 180
++   - Cheese Burger : 220
++   - French Fries  : 120
++3. Dosa Corner
++   - Masala Dosa   : 90
++   - Idli Vada     : 70
++   - Filter Coffee : 40
++> order Pizza House "Margherita Pizza" 1 "Garlic Bread" 2
++[Client] Order placed successfully.
++[Client] Order ID: O101
++[Client] Items: Margherita Pizza x1, Garlic Bread x2
++[Client] Total: 550
++[Client] Status: PLACED
++> track O101
++[Client] Tracking order O101...
++> sleep 5
++[Update] Order O101 : PLACED
++[Update] Order O101 : ACCEPTED
++[Update] Order O101 : PREPARING
++[Update] Order O101 : READY
++[Client] Order O101 finished; tracking stopped.
++> cancel O101
++[Error] Order O101 cannot be cancelled: it is already READY. (gRPC status: FAILED_PRECONDITION)
++> status O101
++[Client] Order O101 (Pizza House: Margherita Pizza x1, Garlic Bread x2) : READY
++> sleep 3
++> exit
++[Client] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log b/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+new file mode 100644
+index 0000000..e0c1255
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/customer_bob.log
+@@ -0,0 +1,29 @@
++[Client] Connected as customer 'bob'.
++Options:
++  1. List Restaurants   -> restaurants
++  2. Place Order        -> order <Restaurant> "<Item>" <qty> ["<Item>" <qty> ...]
++  3. Check Order Status -> status <order_id>
++  4. Track Order        -> track <order_id>
++  5. Cancel Order       -> cancel <order_id>
++  6. Exit               -> exit
++> sleep 1
++> order Taco Town "Tacos" 1
++[Error] Restaurant 'Taco Town' does not exist. (gRPC status: NOT_FOUND)
++> order Pizza House "Sushi" 1
++[Error] Item 'Sushi' is not available at Pizza House. (gRPC status: NOT_FOUND)
++> status O999
++[Error] Order O999 does not exist. (gRPC status: NOT_FOUND)
++> order Burger Point "Cheese Burger" 1 "French Fries" 2
++[Client] Order placed successfully.
++[Client] Order ID: O102
++[Client] Items: Cheese Burger x1, French Fries x2
++[Client] Total: 460
++[Client] Status: PLACED
++> sleep 1
++> cancel O102
++[Client] Order O102 : CANCELLED
++> status O102
++[Client] Order O102 (Burger Point: Cheese Burger x1, French Fries x2) : CANCELLED
++> sleep 6
++> exit
++[Client] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+new file mode 100644
+index 0000000..c8fdaf4
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_burger.log
+@@ -0,0 +1,14 @@
++[Restaurant] Logged in as 'Burger Point'.
++Options:
++  1. View Pending Orders -> pending
++  2. Accept Order        -> accept <order_id>
++  3. Start Preparing     -> prepare <order_id>
++  4. Mark Ready          -> ready <order_id>
++  5. Exit                -> exit
++> sleep 1.5
++> accept O101
++[Error] Order O101 belongs to Pizza House, not 'Burger Point'. (gRPC status: PERMISSION_DENIED)
++> sleep 8
++[New Order] O102 from bob: Cheese Burger x1, French Fries x2 (total 460)
++> exit
++[Restaurant] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+new file mode 100644
+index 0000000..5f76ffe
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/restaurant_pizza.log
+@@ -0,0 +1,28 @@
++[Restaurant] Logged in as 'Pizza House'.
++Options:
++  1. View Pending Orders -> pending
++  2. Accept Order        -> accept <order_id>
++  3. Start Preparing     -> prepare <order_id>
++  4. Mark Ready          -> ready <order_id>
++  5. Exit                -> exit
++> sleep 2
++[New Order] O101 from alice: Margherita Pizza x1, Garlic Bread x2 (total 550)
++> pending
++[Restaurant] Order O101 : PLACED   (Margherita Pizza x1, Garlic Bread x2; total 550)
++> accept O101
++[Restaurant] Order O101 : ACCEPTED
++> sleep 1
++> prepare O101
++[Restaurant] Order O101 : PREPARING
++> sleep 1
++> ready O101
++[Restaurant] Order O101 : READY
++> prepare O101
++[Error] Invalid order state transition: READY -> PREPARING. (gRPC status: FAILED_PRECONDITION)
++> accept O102
++[Error] Order O102 belongs to Burger Point, not 'Pizza House'. (gRPC status: PERMISSION_DENIED)
++> pending
++[Restaurant] No pending orders.
++> sleep 3
++> exit
++[Restaurant] Bye.
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/server.log b/section3_q2_food_ordering/demo/sample_logs_rce/server.log
+new file mode 100644
+index 0000000..c3b71fc
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/server.log
+@@ -0,0 +1,12 @@
++[Server] Food Ordering Server listening on 0.0.0.0:33015 (thread pool = 64)
++[Server]   Pizza House: Margherita Pizza (250), Farmhouse Pizza (350), Garlic Bread (150)
++[Server]   Burger Point: Veg Burger (180), Cheese Burger (220), French Fries (120)
++[Server]   Dosa Corner: Masala Dosa (90), Idli Vada (70), Filter Coffee (40)
++[Server] Order O101 PLACED at Pizza House by alice (total 550)
++[Server] Subscriber attached to O101
++[Server] Order O102 PLACED at Burger Point by bob (total 460)
++[Server] Order O101: PLACED -> ACCEPTED (Pizza House)
++[Server] Order O102: PLACED -> CANCELLED (customer)
++[Server] Order O101: ACCEPTED -> PREPARING (Pizza House)
++[Server] Order O101: PREPARING -> READY (Pizza House)
++[Server] Subscriber detached from O101
+diff --git a/section3_q2_food_ordering/demo/sample_logs_rce/tests.log b/section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+new file mode 100644
+index 0000000..10494f8
+--- /dev/null
++++ b/section3_q2_food_ordering/demo/sample_logs_rce/tests.log
+@@ -0,0 +1,22 @@
++PASS  ListRestaurants returns predefined restaurants  [Pizza House, Burger Point, Dosa Corner]
++PASS  PlaceOrder assigns id, total, PLACED  [O101 total=550]
++PASS  GetOrderStatus
++PASS  Subscriber receives PLACED->ACCEPTED->PREPARING->READY and stream closes  [PLACED -> ACCEPTED -> PREPARING -> READY]
++PASS  Order from non-existent restaurant -> NOT_FOUND  [NOT_FOUND: Restaurant 'Taco Town' does not exist.]
++PASS  Order unavailable food item -> NOT_FOUND  [NOT_FOUND: Item 'Sushi' is not available at Pizza House.]
++PASS  Zero quantity -> INVALID_ARGUMENT  [INVALID_ARGUMENT: Quantity for 'Garlic Bread' must be positive.]
++PASS  Access non-existent order -> NOT_FOUND  [NOT_FOUND: Order O99999 does not exist.]
++PASS  Cancel an already ACCEPTED order -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Order O102 cannot be cancelled: it is already ACCEPTED.]
++PASS  Restaurant updates another restaurant's order -> PERMISSION_DENIED  [PERMISSION_DENIED: Order O102 belongs to Pizza House, not 'Burger Point'.]
++PASS  Invalid transition ACCEPTED->READY -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Invalid order state transition: ACCEPTED -> READY.]
++PASS  Invalid transition READY->PREPARING -> FAILED_PRECONDITION  [FAILED_PRECONDITION: Invalid order state transition: READY -> PREPARING.]
++PASS  Cancel someone else's order -> PERMISSION_DENIED  [PERMISSION_DENIED: Order O103 was not placed by 'mallory'.]
++PASS  Customer cancels PLACED order
++PASS  200 concurrent PlaceOrder calls get unique order IDs
++PASS  20 racing ACCEPT calls on one order: exactly 1 wins  [wins=1 failed_precondition=19]
++PASS  Cancel-vs-accept race (20 trials): exactly one wins, state consistent  [20/20]
++PASS  5 concurrent subscribers each receive all 4 states
++PASS  Restaurant is pushed new orders (SubscribeToNewOrders)
++PASS  ListRestaurantOrders shows only this restaurant's active orders
++----
++passed=20 failed=0
+-- 
+2.43.0
+
+
+From b12b414fdf57c2af995481e8fc4aafa4e4a25532 Mon Sep 17 00:00:00 2001
+From: Nishanth-nishu <nishanth0962333@gmail.com>
+Date: Tue, 29 Sep 2026 16:48:10 +0000
+Subject: [PATCH 2/2] Remove comments and docstrings from all source files
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_012h716Kap1LsxB9yFkHUCLd
+---
+ rce_prep.sbatch                               |  6 ---
+ rce_run_all.sh                                |  6 ---
+ section1_q3_triangle_counting/combiner4.py    | 10 -----
+ section1_q3_triangle_counting/gen_graph.py    | 14 +------
+ .../identity_mapper.py                        |  1 -
+ .../make_datasets.sh                          |  1 -
+ section1_q3_triangle_counting/mapper1.py      | 11 ------
+ section1_q3_triangle_counting/partition.py    | 12 ------
+ section1_q3_triangle_counting/reducer1.py     | 11 ------
+ section1_q3_triangle_counting/reducer2.py     | 13 -------
+ section1_q3_triangle_counting/reducer3.py     | 11 ------
+ section1_q3_triangle_counting/reducer4.py     | 10 -----
+ .../run_distributed.sbatch                    | 21 ----------
+ section1_q3_triangle_counting/run_hadoop.sh   |  9 +----
+ section1_q3_triangle_counting/run_local.sh    | 13 -------
+ section1_q3_triangle_counting/run_tests.sh    |  3 +-
+ section1_q3_triangle_counting/sum_reducer.py  |  4 --
+ .../verify_sequential.py                      | 12 +-----
+ section3_q2_food_ordering/common.py           |  5 +--
+ section3_q2_food_ordering/customer.py         | 24 +-----------
+ section3_q2_food_ordering/food_ordering.proto | 16 ++------
+ section3_q2_food_ordering/proto_gen.py        | 10 +----
+ section3_q2_food_ordering/restaurant.py       | 18 ---------
+ section3_q2_food_ordering/run_demo.sbatch     | 15 --------
+ section3_q2_food_ordering/run_demo_local.sh   |  2 -
+ section3_q2_food_ordering/server.py           | 38 ++-----------------
+ section3_q2_food_ordering/setup.sh            |  3 +-
+ .../test_food_ordering.py                     | 20 ----------
+ 28 files changed, 16 insertions(+), 303 deletions(-)
+
+diff --git a/rce_prep.sbatch b/rce_prep.sbatch
+index 3306144..a29cb31 100755
+--- a/rce_prep.sbatch
++++ b/rce_prep.sbatch
+@@ -8,17 +8,11 @@
+ #SBATCH --ntasks=1
+ #SBATCH --cpus-per-task=1
+ #SBATCH --time=00:15:00
+-# Runs on a COMPUTE node: installs gRPC (if missing), generates stubs,
+-# runs the correctness tests and generates the benchmark datasets.
+ set -e
+ ROOT="${SLURM_SUBMIT_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+ cd "$ROOT"
+ echo "Node: $(hostname)   $(python3 --version)   repo: $(git rev-parse --short HEAD 2>/dev/null)"
+ 
+-# RCE compute nodes run Python 3.6.8 with an old pip that cannot use manylinux2014
+-# wheels and falls back to compiling grpcio from source (runs out of memory).
+-# -> upgrade pip (21.3.1 is the last for py3.6) and install prebuilt wheels only:
+-#    grpcio / grpcio-tools 1.48.2 are the last releases with cp36 wheels.
+ python3 -c "import grpc, grpc_tools" 2>/dev/null || {
+   echo "== installing gRPC wheels (py3.6)"
+   python3 -m pip install --user --quiet --upgrade "pip<22"
+diff --git a/rce_run_all.sh b/rce_run_all.sh
+index 0fd93e9..756abfc 100755
+--- a/rce_run_all.sh
++++ b/rce_run_all.sh
+@@ -1,8 +1,4 @@
+ #!/bin/bash
+-# Submit everything to SLURM from the RCE login node. Nothing heavy runs here:
+-# this script only calls sbatch (setup/tests/datasets run inside hw3_prep).
+-#   bash rce_run_all.sh          -> submit all jobs
+-#   bash rce_run_all.sh collect  -> print results after the jobs finish
+ cd "$(dirname "$0")"
+ ROOT=$PWD
+ if [ "$1" = "collect" ]; then
+@@ -23,7 +19,6 @@ chmod +x rce_prep.sbatch section1_q3_triangle_counting/*.{sh,py,sbatch} section3
+ PREP=$(sbatch --parsable rce_prep.sbatch)
+ echo "prep job:            $PREP"
+ 
+-# Section 1 Q3: scaling runs, one after another (fair timings), after prep succeeds
+ cd "$ROOT/section1_q3_triangle_counting"
+ J=$(sbatch --parsable --dependency=afterok:$PREP --nodes=1 --ntasks=1 run_distributed.sbatch)
+ echo "triangles 1n/1t:     $J"
+@@ -33,7 +28,6 @@ for cfg in "2 2" "4 4" "4 8"; do
+   echo "triangles ${1}n/${2}t:     $J"
+ done
+ 
+-# Section 3 P2: multi-node demo + tests, after prep succeeds
+ cd "$ROOT/section3_q2_food_ordering"
+ D=$(sbatch --parsable --dependency=afterok:$PREP run_demo.sbatch)
+ echo "food ordering demo:  $D"
+diff --git a/section1_q3_triangle_counting/combiner4.py b/section1_q3_triangle_counting/combiner4.py
+index 72af115..f1a0f8e 100755
+--- a/section1_q3_triangle_counting/combiner4.py
++++ b/section1_q3_triangle_counting/combiner4.py
+@@ -1,14 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 4 - Combiner (optional, map-side): pre-aggregate wedge counts per edge id.
+-
+-Input : sorted "a,b<TAB>$" / "a,b<TAB><count>" lines of ONE mapper.
+-Output: at most one "$" and one "<count>" line per key.
+-
+-Reduces shuffle volume when the same closing edge is the target of many
+-wedges (common around hubs). It is associative, so it is safe to run zero,
+-one or many times.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/gen_graph.py b/section1_q3_triangle_counting/gen_graph.py
+index 4e1bd63..126b9f3 100755
+--- a/section1_q3_triangle_counting/gen_graph.py
++++ b/section1_q3_triangle_counting/gen_graph.py
+@@ -1,15 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Reproducible undirected-graph generator in the assignment input format.
+-
+-    gen_graph.py V E [--seed S] [--model er|powerlaw] > graph.txt
+-
+-  er       : Erdos-Renyi style, E distinct edges chosen uniformly.
+-  powerlaw : preferential-attachment style (skewed degrees, many triangles
+-             around hubs) - a harder case for triangle counting.
+-
+-Output: "V E" on the first line, then E lines "u v" (u != v, no duplicates).
+-"""
+ import argparse
+ import random
+ import sys
+@@ -35,7 +24,7 @@ def main():
+             if u != v:
+                 edges.add((u, v) if u < v else (v, u))
+     else:
+-        targets = [0, 1]  # endpoint list => sampling proportional to degree
++        targets = [0, 1]
+         while len(edges) < E:
+             u = rng.randrange(V)
+             v = rng.choice(targets) if rng.random() < 0.8 else rng.randrange(V)
+@@ -50,7 +39,6 @@ def main():
+     edges = list(edges)
+     rng.shuffle(edges)
+     for u, v in edges:
+-        # randomise direction so both orientations appear in the input
+         if rng.random() < 0.5:
+             u, v = v, u
+         out.write(f"{u} {v}\n")
+diff --git a/section1_q3_triangle_counting/identity_mapper.py b/section1_q3_triangle_counting/identity_mapper.py
+index f0ba3c8..adc4b65 100755
+--- a/section1_q3_triangle_counting/identity_mapper.py
++++ b/section1_q3_triangle_counting/identity_mapper.py
+@@ -1,5 +1,4 @@
+ #!/usr/bin/env python3
+-"""Identity mapper used by Jobs 2-4 (their input is already key<TAB>value)."""
+ import sys
+ 
+ sys.stdout.writelines(line for line in sys.stdin if "\t" in line)
+diff --git a/section1_q3_triangle_counting/make_datasets.sh b/section1_q3_triangle_counting/make_datasets.sh
+index 7d856cb..43b492f 100755
+--- a/section1_q3_triangle_counting/make_datasets.sh
++++ b/section1_q3_triangle_counting/make_datasets.sh
+@@ -1,5 +1,4 @@
+ #!/bin/bash
+-# Reproducible benchmark datasets (fixed seeds). Output goes to test_data/.
+ set -e
+ cd "$(dirname "$0")"
+ mkdir -p test_data
+diff --git a/section1_q3_triangle_counting/mapper1.py b/section1_q3_triangle_counting/mapper1.py
+index c977a97..f1427ae 100755
+--- a/section1_q3_triangle_counting/mapper1.py
++++ b/section1_q3_triangle_counting/mapper1.py
+@@ -1,15 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 1 - Mapper: build adjacency.
+-
+-Input : one undirected edge per line, "u v" (the "V E" header line is stripped
+-        by the driver scripts before the data is split across mappers).
+-Output: "u<TAB>v" and "v<TAB>u" for every edge, so the reducer for vertex x
+-        receives the full neighbour list of x.
+-
+-Self-loops (u == v) and malformed lines are ignored: they can never be part of
+-a triangle.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/partition.py b/section1_q3_triangle_counting/partition.py
+index 18322e0..9ef4115 100755
+--- a/section1_q3_triangle_counting/partition.py
++++ b/section1_q3_triangle_counting/partition.py
+@@ -1,16 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Hash partitioner used by the SLURM (non-Hadoop) distributed driver.
+-
+-    partition.py <num_reducers> <output_prefix>
+-
+-Reads key<TAB>value lines on stdin and appends each line to
+-"<output_prefix>_p<r>" where r = crc32(key) mod num_reducers.
+-
+-This plays the role of Hadoop's HashPartitioner: all values for one key end
+-up at the same reducer. crc32 is used (not Python's hash()) because it is
+-deterministic across processes and nodes.
+-"""
+ import sys
+ import zlib
+ 
+diff --git a/section1_q3_triangle_counting/reducer1.py b/section1_q3_triangle_counting/reducer1.py
+index c30ebeb..e8e72f4 100755
+--- a/section1_q3_triangle_counting/reducer1.py
++++ b/section1_q3_triangle_counting/reducer1.py
+@@ -1,15 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 1 - Reducer: compute the degree of every vertex.
+-
+-Input : "x<TAB>y" lines grouped (sorted) by x.
+-Output: for every distinct neighbour y of x, one record keyed by the
+-        canonical edge id "min(x,y),max(x,y)" carrying "x deg(x)".
+-
+-Duplicate edges in the input are removed here (neighbours kept in a set),
+-so an edge listed twice (e.g. "0 1" and "1 0") is not counted twice.
+-Job 2 then sees exactly two records per edge: one from each endpoint.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/reducer2.py b/section1_q3_triangle_counting/reducer2.py
+index 25ad832..3039029 100755
+--- a/section1_q3_triangle_counting/reducer2.py
++++ b/section1_q3_triangle_counting/reducer2.py
+@@ -1,17 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 2 - Reducer: orient every edge from lower rank to higher rank.
+-
+-Input : "a,b<TAB>x deg(x)" grouped by edge id; two values per edge.
+-Output: "low<TAB>high" where rank(v) = (deg(v), v).
+-
+-Orienting edges by (degree, id) gives a total order on vertices. Every
+-triangle {p, q, r} with rank(p) < rank(q) < rank(r) is therefore discovered
+-exactly once - at its lowest-ranked vertex p - which is what guarantees no
+-double counting. Pointing edges towards higher-degree vertices also bounds the
+-out-degree of every vertex by O(sqrt(E)), which keeps the number of wedges
+-generated in Job 3 at O(E^1.5) even on skewed (power-law) graphs.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/reducer3.py b/section1_q3_triangle_counting/reducer3.py
+index 481c81e..2ba3460 100755
+--- a/section1_q3_triangle_counting/reducer3.py
++++ b/section1_q3_triangle_counting/reducer3.py
+@@ -1,15 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 3 - Reducer: generate wedges (open triads) at each vertex.
+-
+-Input : "v<TAB>h" oriented edges (v has lower rank than h), grouped by v.
+-Output: two kinds of records, both keyed by a canonical edge id "a,b":
+-          "a,b<TAB>$"  - edge (v,h) exists  (one per oriented edge)
+-          "a,b<TAB>1"  - a wedge a <- v -> b was found; the triangle
+-                         {v,a,b} exists iff edge (a,b) exists.
+-
+-Job 4 joins the two on the edge id.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/reducer4.py b/section1_q3_triangle_counting/reducer4.py
+index a5c9d91..7f81e8f 100755
+--- a/section1_q3_triangle_counting/reducer4.py
++++ b/section1_q3_triangle_counting/reducer4.py
+@@ -1,14 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Job 4 - Reducer: close wedges and count triangles.
+-
+-Input : "a,b<TAB>$" and "a,b<TAB><count>" grouped by edge id.
+-Output: a single line "triangles<TAB><partial count>" for this reducer.
+-
+-For each edge id, if the edge exists ("$" seen) every wedge that points at it
+-is a real triangle. Each triangle produces exactly one wedge (at its
+-lowest-ranked vertex, see reducer2.py), so the sum is exact.
+-"""
+ import sys
+ 
+ 
+diff --git a/section1_q3_triangle_counting/run_distributed.sbatch b/section1_q3_triangle_counting/run_distributed.sbatch
+index 0d97d42..59ad3fc 100755
+--- a/section1_q3_triangle_counting/run_distributed.sbatch
++++ b/section1_q3_triangle_counting/run_distributed.sbatch
+@@ -9,23 +9,6 @@
+ #SBATCH --cpus-per-task=1
+ #SBATCH --time=00:30:00
+ 
+-# ============================================================
+-# Distributed MapReduce Triangle Counting - SLURM driver
+-#
+-#   sbatch run_distributed.sbatch [file1 file2 ...]      (files in test_data/)
+-#   sbatch --nodes=2 --ntasks=8 run_distributed.sbatch    (change parallelism)
+-#
+-# Every job runs as two distributed phases on $NT SLURM tasks:
+-#   MAP    : task t reads input split t -> mapper [-> sort -> combiner]
+-#            -> hash partition into $NT buckets   (j<J>_m<t>_p<r>)
+-#   REDUCE : task r gathers bucket r from all mappers -> sort -> reducer
+-#            (j<J>_out_<r>)
+-# i.e. a real map / shuffle(hash-partition) / sort / reduce, with the
+-# shared home filesystem acting as the "DFS" between nodes.
+-#
+-# Without SLURM (no srun) the tasks are run as local background processes,
+-# so the same script can be tested on a laptop.
+-# ============================================================
+ set -uo pipefail
+ export LC_ALL=C
+ 
+@@ -50,7 +33,6 @@ else TEST_FILES=(sample.txt tri_small.txt tri_medium.txt tri_large.txt tri_power
+ USE_SRUN=0
+ if [ -n "${SLURM_JOB_ID:-}" ] && command -v srun >/dev/null 2>&1; then USE_SRUN=1; fi
+ 
+-# run a command string on NT parallel tasks; $SLURM_PROCID = task id
+ launch() {
+   if [ "$USE_SRUN" = 1 ]; then
+     srun --ntasks="$NT" --kill-on-bad-exit=1 bash -c "$1"
+@@ -64,8 +46,6 @@ launch() {
+ now() { date +%s%N; }
+ secs() { echo "scale=6; ($2 - $1) / 1000000000" | bc; }
+ 
+-# ---- generic MapReduce job ---------------------------------------------
+-# run_job J MAPPER COMBINER(or "") REDUCER IN_PREFIX   -> sets MAP_T, RED_T
+ run_job() {
+   export J=$1 MAPPER=$2 COMBINER=$3 REDUCER=$4 IN_PREFIX=$5
+   local s e
+@@ -111,7 +91,6 @@ for TEST_FILE in "${TEST_FILES[@]}"; do
+   rm -f "$WORK"/*
+   TOTAL_START=$(now)
+ 
+-  # Setup: strip header, split edge list into NT line-aligned chunks (the "DFS blocks")
+   s=$(now)
+   tail -n +2 "$INPUT_PATH" > "$WORK/edges.txt"
+   split -d -a 2 -n l/"$NT" "$WORK/edges.txt" "$WORK/j0_out_"
+diff --git a/section1_q3_triangle_counting/run_hadoop.sh b/section1_q3_triangle_counting/run_hadoop.sh
+index 9cfdceb..e289a06 100755
+--- a/section1_q3_triangle_counting/run_hadoop.sh
++++ b/section1_q3_triangle_counting/run_hadoop.sh
+@@ -1,11 +1,4 @@
+ #!/bin/bash
+-# ============================================================
+-# Optional: the same 4-job pipeline on a real Hadoop cluster (Hadoop Streaming).
+-#
+-#   ./run_hadoop.sh <local_graph_file> [num_reducers]
+-#
+-# Needs HADOOP_HOME (or `hadoop` on PATH) and HDFS/YARN running.
+-# ============================================================
+ set -euo pipefail
+ cd "$(dirname "$0")"
+ IN=${1:?usage: run_hadoop.sh graph.txt [reducers]}
+@@ -16,7 +9,7 @@ STREAM_JAR=$(ls "${HADOOP_HOME:-/usr/local/hadoop}"/share/hadoop/tools/lib/hadoo
+ hdfs dfs -mkdir -p "$HD"
+ tail -n +2 "$IN" | hdfs dfs -put -f - "$HD/edges.txt"
+ 
+-job() {  # name mapper combiner reducer in out
++job() {
+   local comb=() files="$2,$4"
+   if [ -n "$3" ]; then comb=(-combiner "python3 $3"); files="$files,$3"; fi
+   hadoop jar "$STREAM_JAR" \
+diff --git a/section1_q3_triangle_counting/run_local.sh b/section1_q3_triangle_counting/run_local.sh
+index e193fff..23472d3 100755
+--- a/section1_q3_triangle_counting/run_local.sh
++++ b/section1_q3_triangle_counting/run_local.sh
+@@ -1,17 +1,4 @@
+ #!/bin/bash
+-# ============================================================
+-# Triangle counting - single-machine MapReduce simulation
+-# (same idea as MapreduceForLocalTesting.sh: `sort` plays the shuffle).
+-#
+-#   ./run_local.sh [input_file] [output_file]
+-#
+-# Four chained MapReduce jobs + a final sum:
+-#   Job 1  mapper1  | sort | reducer1            adjacency + degree
+-#   Job 2  identity | sort | reducer2            orient edges by (deg,id)
+-#   Job 3  identity | sort | reducer3            wedges + edge markers
+-#   Job 4  identity | sort | combiner4 | sort | reducer4   close wedges
+-#   Final  sum_reducer                           global count
+-# ============================================================
+ set -euo pipefail
+ cd "$(dirname "$0")"
+ export LC_ALL=C
+diff --git a/section1_q3_triangle_counting/run_tests.sh b/section1_q3_triangle_counting/run_tests.sh
+index cd43c57..95a555f 100755
+--- a/section1_q3_triangle_counting/run_tests.sh
++++ b/section1_q3_triangle_counting/run_tests.sh
+@@ -1,12 +1,11 @@
+ #!/bin/bash
+-# Correctness tests: MapReduce pipeline vs. sequential / brute-force reference.
+ set -u
+ cd "$(dirname "$0")"
+ export LC_ALL=C
+ TMP=$(mktemp -d)
+ pass=0; fail=0
+ 
+-check() {  # name graph_file expected
++check() {
+   local got
+   ./run_local.sh "$2" "$TMP/out" >/dev/null
+   got=$(cat "$TMP/out")
+diff --git a/section1_q3_triangle_counting/sum_reducer.py b/section1_q3_triangle_counting/sum_reducer.py
+index a147053..5851922 100755
+--- a/section1_q3_triangle_counting/sum_reducer.py
++++ b/section1_q3_triangle_counting/sum_reducer.py
+@@ -1,8 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Final aggregation: add up the partial "triangles<TAB>N" lines produced by the
+-Job 4 reducers and print the single global triangle count (required output).
+-"""
+ import sys
+ 
+ total = 0
+diff --git a/section1_q3_triangle_counting/verify_sequential.py b/section1_q3_triangle_counting/verify_sequential.py
+index 8247f7d..c08cc49 100755
+--- a/section1_q3_triangle_counting/verify_sequential.py
++++ b/section1_q3_triangle_counting/verify_sequential.py
+@@ -1,14 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Sequential reference implementation used for correctness verification.
+-
+-    verify_sequential.py graph.txt            -> prints the triangle count
+-    verify_sequential.py graph.txt --brute    -> O(V^3) brute force (tiny graphs)
+-
+-The fast path is the classic "forward" algorithm with (degree, id) ordering;
+-the brute-force path checks every vertex triple and is completely independent
+-of the MapReduce logic.
+-"""
+ import sys
+ from itertools import combinations
+ 
+@@ -16,7 +6,7 @@ from itertools import combinations
+ def read_graph(path):
+     adj = {}
+     with open(path) as f:
+-        f.readline()  # header "V E"
++        f.readline()
+         for line in f:
+             p = line.split()
+             if len(p) != 2:
+diff --git a/section3_q2_food_ordering/common.py b/section3_q2_food_ordering/common.py
+index 07ac3aa..beb6279 100755
+--- a/section3_q2_food_ordering/common.py
++++ b/section3_q2_food_ordering/common.py
+@@ -1,4 +1,3 @@
+-"""Shared helpers for customer.py and restaurant.py."""
+ import sys
+ import threading
+ 
+@@ -10,7 +9,6 @@ _print_lock = threading.Lock()
+ 
+ 
+ def say(msg, prompt=False):
+-    """Thread-safe print; background streams use prompt=True to redraw '> '."""
+     with _print_lock:
+         if prompt and sys.stdin.isatty():
+             sys.stdout.write("\r" + msg + "\n> ")
+@@ -51,7 +49,6 @@ def print_restaurants(resp, who="[Server]"):
+ 
+ 
+ def read_commands(prompt="> "):
+-    """Yield input lines; works interactively and with piped scripts."""
+     while True:
+         try:
+             if sys.stdin.isatty():
+@@ -62,7 +59,7 @@ def read_commands(prompt="> "):
+                     return
+                 line = line.rstrip("\n")
+                 if line.strip():
+-                    say(f"{prompt}{line}")   # echo scripted commands
++                    say(f"{prompt}{line}")
+         except (EOFError, KeyboardInterrupt):
+             return
+         yield line.strip()
+diff --git a/section3_q2_food_ordering/customer.py b/section3_q2_food_ordering/customer.py
+index 2dc60c6..87b39e6 100755
+--- a/section3_q2_food_ordering/customer.py
++++ b/section3_q2_food_ordering/customer.py
+@@ -1,21 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Customer client (CLI).
+-
+-    python3 customer.py <server_host:port> [customer_name]
+-
+-Menu options (type the number or the command):
+-  1  restaurants                                  List Restaurants
+-  2  order <Restaurant> "<Item>" <qty> ...        Place Order
+-  3  status <order_id>                            Check Order Status
+-  4  track <order_id>                             Track Order (live stream)
+-  5  cancel <order_id>                            Cancel Order
+-  6  exit                                         Exit
+-     sleep <sec>, help
+-
+-`track` runs the server-streaming RPC in a background thread, so the customer
+-keeps using the CLI while updates arrive.
+-"""
+ import shlex
+ import sys
+ import threading
+@@ -42,15 +25,12 @@ class Customer:
+         self.tracking = {}
+         self._restaurants = None
+ 
+-    # ---------------------------------------------------------------------
+     def restaurants(self):
+         resp = self.stub.ListRestaurants(pb.RestaurantRequest())
+         self._restaurants = [r.name for r in resp.restaurants]
+         print_restaurants(resp)
+ 
+     def _split_order_args(self, toks):
+-        """Split `Pizza House "Margherita Pizza" 1 "Garlic Bread" 2` into
+-        restaurant + (item, qty) pairs; restaurant may be unquoted."""
+         if self._restaurants is None:
+             self._restaurants = [r.name for r in self.stub.ListRestaurants(pb.RestaurantRequest()).restaurants]
+         known = {r.lower() for r in self._restaurants}
+@@ -67,7 +47,7 @@ class Customer:
+         return " ".join(toks[:pick]), [(rest[i], int(rest[i + 1])) for i in range(0, len(rest), 2)]
+ 
+     def order(self, toks):
+-        if not toks:  # interactive mode
++        if not toks:
+             rname = input("Restaurant: ").strip()
+             items = []
+             while True:
+@@ -95,7 +75,6 @@ class Customer:
+         if oid in self.tracking and self.tracking[oid].is_alive():
+             say(f"[Client] Already tracking {oid}.")
+             return
+-        # Validate synchronously so NOT_FOUND is reported immediately.
+         self.stub.GetOrderStatus(pb.OrderStatusRequest(order_id=oid))
+         say(f"[Client] Tracking order {oid}...")
+ 
+@@ -116,7 +95,6 @@ class Customer:
+         ack = self.stub.CancelOrder(pb.CancelRequest(order_id=oid, customer=self.name))
+         say(f"[Client] {ack.message}")
+ 
+-    # ---------------------------------------------------------------------
+     def loop(self):
+         say(f"[Client] Connected as customer '{self.name}'.\n{HELP}")
+         for line in read_commands():
+diff --git a/section3_q2_food_ordering/food_ordering.proto b/section3_q2_food_ordering/food_ordering.proto
+index 88396fe..8e493f4 100644
+--- a/section3_q2_food_ordering/food_ordering.proto
++++ b/section3_q2_food_ordering/food_ordering.proto
+@@ -2,14 +2,6 @@ syntax = "proto3";
+ 
+ package food;
+ 
+-// ---------------------------------------------------------------------------
+-// Food Ordering Service
+-//   Required RPCs : ListRestaurants, PlaceOrder, GetOrderStatus,
+-//                   UpdateOrderStatus, SubscribeToOrderUpdates
+-//   Extra RPCs    : CancelOrder              (customer "Cancel Order" option)
+-//                   ListRestaurantOrders     (restaurant "View Pending Orders")
+-//                   SubscribeToNewOrders     (restaurant gets new orders pushed)
+-// ---------------------------------------------------------------------------
+ service FoodOrderingService {
+   rpc ListRestaurants(RestaurantRequest) returns (RestaurantResponse);
+   rpc PlaceOrder(OrderRequest) returns (OrderResponse);
+@@ -52,8 +44,6 @@ message OrderItem {
+   int32 quantity = 2;
+ }
+ 
+-// Used both to place an order (restaurant + items) and to subscribe to an
+-// existing order (order_id only), as specified in the assignment API.
+ message OrderRequest {
+   string restaurant = 1;
+   repeated OrderItem items = 2;
+@@ -86,13 +76,13 @@ message OrderStatusResponse {
+ 
+ message OrderStatusUpdate {
+   string order_id = 1;
+-  string restaurant = 2;   // caller identity; must own the order
++  string restaurant = 2;
+   OrderStatus new_status = 3;
+ }
+ 
+ message CancelRequest {
+   string order_id = 1;
+-  string customer = 2;     // caller identity; must own the order
++  string customer = 2;
+ }
+ 
+ message Acknowledge {
+@@ -103,7 +93,7 @@ message Acknowledge {
+ 
+ message RestaurantOrdersRequest {
+   string restaurant = 1;
+-  bool include_completed = 2;  // false => only PLACED / ACCEPTED / PREPARING
++  bool include_completed = 2;
+ }
+ 
+ message RestaurantOrdersResponse {
+diff --git a/section3_q2_food_ordering/proto_gen.py b/section3_q2_food_ordering/proto_gen.py
+index ddee599..cc12eab 100755
+--- a/section3_q2_food_ordering/proto_gen.py
++++ b/section3_q2_food_ordering/proto_gen.py
+@@ -1,9 +1,3 @@
+-"""
+-Generates food_ordering_pb2.py / food_ordering_pb2_grpc.py from the .proto
+-on first import (or when the .proto is newer), using the grpcio-tools that is
+-installed on the machine. Generating locally avoids protobuf
+-gencode/runtime version mismatches between machines (e.g. laptop vs. RCE).
+-"""
+ import os
+ import sys
+ 
+@@ -30,7 +24,7 @@ def ensure():
+ 
+ 
+ ensure()
+-import food_ordering_pb2 as pb  # noqa: E402
+-import food_ordering_pb2_grpc as rpc  # noqa: E402
++import food_ordering_pb2 as pb
++import food_ordering_pb2_grpc as rpc
+ 
+ STATUS_NAME = {v: k for k, v in pb.OrderStatus.items()}
+diff --git a/section3_q2_food_ordering/restaurant.py b/section3_q2_food_ordering/restaurant.py
+index 3206533..f3dc928 100755
+--- a/section3_q2_food_ordering/restaurant.py
++++ b/section3_q2_food_ordering/restaurant.py
+@@ -1,22 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Restaurant client (CLI).
+-
+-    python3 restaurant.py <server_host:port> "<Restaurant Name>" [--no-watch]
+-
+-Menu options (type the number or the command):
+-  1  pending              View Pending Orders (PLACED / ACCEPTED / PREPARING)
+-  2  accept  <order_id>   Accept Order        (PLACED    -> ACCEPTED)
+-  3  prepare <order_id>   Start Preparing     (ACCEPTED  -> PREPARING)
+-  4  ready   <order_id>   Mark Ready          (PREPARING -> READY)
+-  5  exit                 Exit
+-     all                  all orders incl. completed
+-     reject <order_id>    PLACED -> CANCELLED
+-     sleep <sec>, help
+-
+-By default a background thread subscribes to SubscribeToNewOrders so new
+-orders are pushed to the restaurant as soon as customers place them.
+-"""
+ import shlex
+ import sys
+ import threading
+diff --git a/section3_q2_food_ordering/run_demo.sbatch b/section3_q2_food_ordering/run_demo.sbatch
+index 1e55de6..b3c6c3d 100755
+--- a/section3_q2_food_ordering/run_demo.sbatch
++++ b/section3_q2_food_ordering/run_demo.sbatch
+@@ -9,29 +9,15 @@
+ #SBATCH --cpus-per-task=1
+ #SBATCH --time=00:05:00
+ 
+-# ============================================================
+-# Non-interactive, multi-node demo of the Food Ordering system on RCE.
+-#   node 1 : gRPC server             (0.0.0.0:$PORT)
+-#   node 2 : customers alice + bob   (connect to <node1>:$PORT)
+-#   node 3 : restaurants Pizza House + Burger Point
+-# Clients replay the command scripts in demo/*.txt. Logs -> demo/logs_<jobid>/
+-#
+-#   sbatch run_demo.sbatch            (run ./setup.sh once on the login node first)
+-# ============================================================
+ cd "${SLURM_SUBMIT_DIR:-$(dirname "$0")}"
+-# PORT=0 (default): the server binds a free port chosen by the OS and reports it via a
+-# port file on the shared filesystem. A fixed port (e.g. 50051) can already be taken
+-# on a shared compute node by another user's server -> bind fails / wrong server answers.
+ PORT=${PORT:-0}
+ mapfile -t NODES < <(scontrol show hostnames "$SLURM_JOB_NODELIST")
+ SERVER=${NODES[0]}; CUST=${NODES[1]}; REST=${NODES[2]}
+ LOG=demo/logs_${SLURM_JOB_ID}; mkdir -p "$LOG"
+ 
+-# --overlap lets several job steps share a node (Slurm >= 20.11); older Slurm shares by default
+ OVERLAP=""; srun --help 2>&1 | grep -q -- "--overlap" && OVERLAP="--overlap"
+ step() { srun --nodes=1 --ntasks=1 $OVERLAP -w "$1" "${@:2}"; }
+ 
+-# start_server <port-file> [server.py args...] : launches on $SERVER, waits for the port file
+ start_server() {
+   local pf=$1; shift; rm -f "$pf"
+   step "$SERVER" python3 -u server.py "0.0.0.0:$PORT" --port-file "$pf" "$@" &
+@@ -59,7 +45,6 @@ for f in server restaurant_pizza restaurant_burger customer_alice customer_bob;
+   echo "================= $f ($LOG/$f.log) ================="; cat "$LOG/$f.log"
+ done
+ 
+-# Automated correctness + concurrency tests, client on another node than the server
+ start_server "$LOG/test_server.port" --quiet || exit 1
+ TP=$SRV_PID
+ echo "================= test_food_ordering.py ($CUST -> $SERVER:$SRV_PORT) ================="
+diff --git a/section3_q2_food_ordering/run_demo_local.sh b/section3_q2_food_ordering/run_demo_local.sh
+index ea3f47d..9f32d5b 100755
+--- a/section3_q2_food_ordering/run_demo_local.sh
++++ b/section3_q2_food_ordering/run_demo_local.sh
+@@ -1,6 +1,4 @@
+ #!/bin/bash
+-# Scripted multi-client demo on ONE machine (4 client processes + server).
+-# Logs are written to demo/logs/. For the cluster version see run_demo.sbatch.
+ cd "$(dirname "$0")"
+ PORT=${1:-50051}
+ mkdir -p demo/logs
+diff --git a/section3_q2_food_ordering/server.py b/section3_q2_food_ordering/server.py
+index 3310b08..8b5e707 100755
+--- a/section3_q2_food_ordering/server.py
++++ b/section3_q2_food_ordering/server.py
+@@ -1,29 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-gRPC Food Ordering Server.
+-
+-    python3 server.py [address]            default address 0.0.0.0:50051
+-    python3 server.py localhost:50051
+-    python3 server.py 0.0.0.0:50051 --max-workers 64 --quiet
+-
+-State (all in memory):
+-  RESTAURANTS  : predefined, read-only -> no locking needed
+-  orders       : order_id -> Order          (guarded by self._lock)
+-  order_subs   : order_id -> [Queue, ...]   (guarded by self._lock)
+-  new_order_subs: restaurant -> [Queue, ...](guarded by self._lock)
+-
+-Concurrency model
+-  * grpc.server uses a thread pool, so many RPCs run in parallel.
+-  * Every read-modify-write of order state (id generation, validation of a
+-    status transition, the transition itself and the fan-out to subscriber
+-    queues) happens inside ONE critical section on self._lock. Two
+-    restaurants/customers racing on the same order are therefore serialised:
+-    exactly one transition wins, the other sees the new state and gets
+-    FAILED_PRECONDITION.
+-  * Streaming RPCs never hold the lock while blocked: each subscriber owns a
+-    thread-safe queue.Queue that the writer pushes snapshots into. A slow
+-    subscriber cannot stall writers or other subscribers.
+-"""
+ import argparse
+ import os
+ import queue
+@@ -42,12 +17,11 @@ RESTAURANTS = {
+ }
+ 
+ S = pb.OrderStatus
+-# Allowed transitions and who may perform them.
+ RESTAURANT_TRANSITIONS = {
+     (S.Value("PLACED"), S.Value("ACCEPTED")),
+     (S.Value("ACCEPTED"), S.Value("PREPARING")),
+     (S.Value("PREPARING"), S.Value("READY")),
+-    (S.Value("PLACED"), S.Value("CANCELLED")),   # restaurant rejects the order
++    (S.Value("PLACED"), S.Value("CANCELLED")),
+ }
+ TERMINAL = {S.Value("READY"), S.Value("CANCELLED")}
+ ACTIVE = {S.Value("PLACED"), S.Value("ACCEPTED"), S.Value("PREPARING")}
+@@ -58,7 +32,6 @@ def now_ms():
+ 
+ 
+ def _canon(name, choices):
+-    """Case/whitespace-insensitive lookup of a restaurant or item name."""
+     key = " ".join(name.split()).lower()
+     for c in choices:
+         if c.lower() == key:
+@@ -75,7 +48,6 @@ class FoodOrderingServicer(rpc.FoodOrderingServiceServicer):
+         self._new_order_subs = {}
+         self._verbose = verbose
+ 
+-    # ------------------------------------------------------------ helpers --
+     def _log(self, msg):
+         if self._verbose:
+             print(f"[Server] {msg}", flush=True)
+@@ -92,12 +64,10 @@ class FoodOrderingServicer(rpc.FoodOrderingServiceServicer):
+         return order
+ 
+     def _publish_locked(self, order, message):
+-        """Fan out a snapshot to every subscriber of this order (lock held)."""
+         upd = pb.OrderUpdate(order=self._snapshot(order), message=message)
+         for q in self._order_subs.get(order.order_id, []):
+             q.put(upd)
+ 
+-    # ------------------------------------------------------------ RPCs -----
+     def ListRestaurants(self, request, context):
+         resp = pb.RestaurantResponse()
+         for name, menu in RESTAURANTS.items():
+@@ -213,7 +183,7 @@ class FoodOrderingServicer(rpc.FoodOrderingServiceServicer):
+                     continue
+                 yield upd
+                 if upd.order.status in TERMINAL:
+-                    return          # order finished -> close the stream
++                    return
+         finally:
+             with self._lock:
+                 subs = self._order_subs.get(oid, [])
+@@ -250,9 +220,9 @@ def serve(address, max_workers=64, verbose=True, block=True, port_file=None):
+     if port == 0:
+         raise SystemExit(f"Could not bind to {address}")
+     server.start()
+-    if address.rsplit(":", 1)[-1] == "0":            # port 0 -> OS picked a free port
++    if address.rsplit(":", 1)[-1] == "0":
+         address = f"{address.rsplit(':', 1)[0]}:{port}"
+-    if port_file:                                     # lets job scripts discover the port
++    if port_file:
+         with open(port_file + ".tmp", "w") as f:
+             f.write(f"{port}\n")
+         os.replace(port_file + ".tmp", port_file)
+diff --git a/section3_q2_food_ordering/setup.sh b/section3_q2_food_ordering/setup.sh
+index cbccc50..0510480 100755
+--- a/section3_q2_food_ordering/setup.sh
++++ b/section3_q2_food_ordering/setup.sh
+@@ -1,9 +1,8 @@
+ #!/bin/bash
+-# One-time setup. On RCE this is done inside rce_prep.sbatch on a compute node.
+ set -e
+ cd "$(dirname "$0")"
+ python3 -c "import grpc, grpc_tools" 2>/dev/null || {
+-  python3 -m pip install --user --quiet --upgrade "pip<22"          # py3.6 on RCE
++  python3 -m pip install --user --quiet --upgrade "pip<22"
+   python3 -m pip install --user --quiet --only-binary=:all: \
+       "grpcio==1.48.2" "grpcio-tools==1.48.2" "protobuf<4"
+ }
+diff --git a/section3_q2_food_ordering/test_food_ordering.py b/section3_q2_food_ordering/test_food_ordering.py
+index f27a159..90e8391 100755
+--- a/section3_q2_food_ordering/test_food_ordering.py
++++ b/section3_q2_food_ordering/test_food_ordering.py
+@@ -1,15 +1,4 @@
+ #!/usr/bin/env python3
+-"""
+-Automated correctness tests for the Food Ordering system.
+-
+-    python3 test_food_ordering.py            # starts its own server on a free port
+-    python3 test_food_ordering.py host:port  # test an already-running server
+-
+-Covers: listing, placing orders, full lifecycle, streaming updates, all six
+-exception cases from the assignment (with their gRPC status codes), and
+-concurrency (unique IDs under parallel PlaceOrder; exactly one winner when
+-restaurants race on the same transition; concurrent subscribers).
+-"""
+ import sys
+ import threading
+ import time
+@@ -58,13 +47,11 @@ def main():
+     grpc.channel_ready_future(ch).result(timeout=10)
+     stub = rpc.FoodOrderingServiceStub(ch)
+ 
+-    # 1. listing
+     rs = stub.ListRestaurants(pb.RestaurantRequest()).restaurants
+     names = [r.name for r in rs]
+     check("ListRestaurants returns predefined restaurants",
+           "Pizza House" in names and "Burger Point" in names, ", ".join(names))
+ 
+-    # 2. place order (assignment example: 250*1 + 150*2 = 550)
+     o = place(stub)
+     check("PlaceOrder assigns id, total, PLACED",
+           o.order_id.startswith("O") and o.total == 550 and o.status == S.Value("PLACED"),
+@@ -72,7 +59,6 @@ def main():
+     check("GetOrderStatus", stub.GetOrderStatus(pb.OrderStatusRequest(order_id=o.order_id)).order.status
+           == S.Value("PLACED"))
+ 
+-    # 3. streaming: subscribe then walk through the lifecycle
+     got = []
+     ready = threading.Event()
+ 
+@@ -89,7 +75,6 @@ def main():
+     check("Subscriber receives PLACED->ACCEPTED->PREPARING->READY and stream closes",
+           got == ["PLACED", "ACCEPTED", "PREPARING", "READY"] and not t.is_alive(), " -> ".join(got))
+ 
+-    # 4. exception cases
+     expect_code("Order from non-existent restaurant -> NOT_FOUND",
+                 lambda: place(stub, rest="Taco Town"), grpc.StatusCode.NOT_FOUND)
+     expect_code("Order unavailable food item -> NOT_FOUND",
+@@ -120,12 +105,10 @@ def main():
+     ack = stub.CancelOrder(pb.CancelRequest(order_id=o3.order_id, customer="bob"))
+     check("Customer cancels PLACED order", ack.order.status == S.Value("CANCELLED"))
+ 
+-    # 5. concurrency: 200 parallel orders -> 200 unique ids
+     with ThreadPoolExecutor(32) as ex:
+         ids = list(ex.map(lambda i: place(stub, cust=f"c{i}").order_id, range(200)))
+     check("200 concurrent PlaceOrder calls get unique order IDs", len(set(ids)) == 200)
+ 
+-    # 6. race: 20 threads try to ACCEPT the same order -> exactly one succeeds
+     o4 = place(stub)
+     wins, fails = [], []
+     barrier = threading.Barrier(20)
+@@ -144,7 +127,6 @@ def main():
+           len(wins) == 1 and all(c == grpc.StatusCode.FAILED_PRECONDITION for c in fails),
+           f"wins={len(wins)} failed_precondition={len(fails)}")
+ 
+-    # 7. race: cancel vs accept on the same PLACED order -> exactly one wins
+     ok = 0
+     for _ in range(20):
+         o5 = place(stub)
+@@ -170,7 +152,6 @@ def main():
+         ok += len(res) == 1 and final == {"A": "ACCEPTED", "C": "CANCELLED"}[res[0]]
+     check("Cancel-vs-accept race (20 trials): exactly one wins, state consistent", ok == 20, f"{ok}/20")
+ 
+-    # 8. multiple concurrent subscribers on one order all see every update
+     o6 = place(stub)
+     seen = [[] for _ in range(5)]
+     started = threading.Barrier(6)
+@@ -192,7 +173,6 @@ def main():
+     check("5 concurrent subscribers each receive all 4 states",
+           all(v == ["PLACED", "ACCEPTED", "PREPARING", "READY"] for v in seen))
+ 
+-    # 9. restaurant new-order push + pending list
+     pushed = []
+     ev = threading.Event()
+ 
+-- 
+2.43.0
+
